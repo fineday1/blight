@@ -1,0 +1,7 @@
+roboflow
+ultralytics
+opencv-python
+tqdm
+matplotlib
+numpy
+opencv-python
