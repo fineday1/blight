@@ -71,26 +71,42 @@ def draw_camera_frustum(ax, P, color='cyan'):
     
     return C
 
-def get_track_point(frame_idx, cameras):
+def get_track_point(frame_idx, cameras, prev_images=None):
     images = []
+    # Optimize: Glob once per frame instead of per camera
+    img_files = sorted(glob.glob(os.path.join(DATA_DIR, f"*frame_{frame_idx:04d}.png")))
     for i in range(len(cameras)):
-        img_files = sorted(glob.glob(os.path.join(DATA_DIR, f"*frame_{frame_idx:04d}.png")))
         if i < len(img_files):
             images.append(cv2.imread(img_files[i], cv2.IMREAD_GRAYSCALE))
     
-    if not images: return None
+    if not images: return None, None
+    
+    # For the first frame or if prev_images is missing, no motion can be detected
+    if prev_images is None:
+        return None, images
     
     x = np.linspace(X_LIMITS[0], X_LIMITS[1], 60)
     y = np.linspace(Y_LIMITS[0], Y_LIMITS[1], 60)
     z = np.linspace(Z_LIMITS[0], Z_LIMITS[1], 60)
     X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
     points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+    points_hom = np.hstack([points, np.ones((points.shape[0], 1))]).T
     scores = np.zeros(points.shape[0])
     
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
     for i, img in enumerate(images):
-        _, mask = cv2.threshold(img, 100, 255, cv2.THRESH_BINARY)
+        if i >= len(prev_images): continue
+        
+        # Motion detection: absolute difference between T and T-1
+        diff = cv2.absdiff(img, prev_images[i])
+        _, mask = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)
+        
+        # Dilate mask to ensure robustness for voxel carving
+        mask = cv2.dilate(mask, kernel, iterations=2)
+        
         P = cameras[i]
-        uv_hom = (P @ np.hstack([points, np.ones((points.shape[0], 1))]).T).T
+        uv_hom = (P @ points_hom).T
         with np.errstate(divide='ignore', invalid='ignore'):
             u = uv_hom[:, 0] / uv_hom[:, 2]
             v = uv_hom[:, 1] / uv_hom[:, 2]
@@ -102,9 +118,11 @@ def get_track_point(frame_idx, cameras):
         
     threshold = max(2, len(cameras) - 1)
     valid_indices = scores >= threshold
+    target = None
     if np.any(valid_indices):
-        return np.mean(points[valid_indices], axis=0)
-    return None
+        target = np.mean(points[valid_indices], axis=0)
+    
+    return target, images
 
 # Main render loop
 if __name__ == "__main__":
@@ -126,6 +144,7 @@ if __name__ == "__main__":
     out = None
     history = []
     window_initialized = False
+    prev_images = None
 
     for i in range(START_FRAME, END_FRAME + 1):
         ax.clear()
@@ -156,7 +175,7 @@ if __name__ == "__main__":
             C = draw_camera_frustum(ax, P, color='cyan')
             cam_centers.append(C)
             
-        target = get_track_point(i, cameras_P)
+        target, prev_images = get_track_point(i, cameras_P, prev_images)
         
         # Draw 3D Elements
         if target is not None:
